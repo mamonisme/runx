@@ -1,0 +1,113 @@
+skill: crm-cleanup
+version: "0.1.0"
+
+catalog:
+  kind: graph
+  audience: operator
+  visibility: public
+  role: context
+
+emits:
+  - name: crm_cleanup
+    packet: runx.crm.cleanup.v1
+
+runners:
+  cleanup:
+    default: true
+    type: graph
+    inputs:
+      data_source_ref:
+        type: string
+        required: true
+        description: Real CRM source ref. A data-store read_projection logical ref OR a connector export path pinned by crm_export_ref. The dogfood run reads live records from this at runtime.
+      crm_export_ref:
+        type: string
+        required: false
+        description: Path/URL to a real CRM connector export (JSON array of records). Used as the runtime source read when no data-store projection is wired.
+      case_id:
+        type: string
+        required: true
+        description: The CRM account/case id to reconcile in this run.
+      transcript:
+        type: string
+        required: true
+        description: The call transcript text to reconcile against the source record.
+      crm_schema:
+        type: json
+        required: false
+        description: crm_schema allowlist. field_updates must stay within these keys; default allowlist used when omitted.
+      health_baseline:
+        type: json
+        required: false
+        description: Read-only baseline overrides - threshold_days_stuck (stall turn-window), cap_pressure_pct (act/spend cap ceiling), refusal_spike_rate (refusal spike threshold). Mapped through the grading norms.
+      mutate:
+        type: boolean
+        required: false
+        description: Write/mutate framing - when true, the skill refuses (read-only contract).
+    graph:
+      name: crm-cleanup
+      steps:
+        - id: cleanup
+          run:
+            type: cli-tool
+            command: node
+            args:
+              - runtime.cjs
+            inputs:
+              data_source_ref: "$input.data_source_ref"
+              crm_export_ref: "$input.crm_export_ref"
+              case_id: "$input.case_id"
+              transcript: "$input.transcript"
+              crm_schema: "$input.crm_schema"
+              health_baseline: "$input.health_baseline"
+              mutate: "$input.mutate"
+          artifacts:
+            named_emits:
+              crm_cleanup: agent_task.crm-cleanup.output.crm_cleanup
+            packets:
+              crm_cleanup: runx.crm.cleanup.v1
+  refuse:
+    default: false
+    type: agent
+
+harness:
+  cases:
+    - name: crm-cleanup-reconcile-sealed
+      runner: cleanup
+      inputs:
+        data_source_ref: local://runx-crm/cleanup-dev
+        crm_export_ref: https://raw.githubusercontent.com/mamonisme/frantic-artifacts/fix79-real-source/b79/fixtures/crm-records.json
+        case_id: globex-002
+        transcript: "Customer has gone quiet, not returning emails, and said they are considering not renewing and might be moving away to a cheaper tool. Clearly at risk."
+        crm_schema: { account_status: "enum(active|lagging|at_risk|churned)", next_action: "string", owner: "string", health_score: "number(0-100)", last_contact: "date", renewal_date: "date", arr: "number(usd)", tags: "array(string)" }
+        health_baseline: { threshold_days_stuck: 5, cap_pressure_pct: 90, refusal_spike_rate: 0.2 }
+      expect:
+        status: sealed
+    - name: crm-cleanup-renewal-recover-sealed
+      runner: cleanup
+      inputs:
+        data_source_ref: local://runx-crm/cleanup-dev
+        crm_export_ref: https://raw.githubusercontent.com/mamonisme/frantic-artifacts/fix79-real-source/b79/fixtures/crm-records.json
+        case_id: acme-001
+        transcript: "Customer said they are happy with the product but mentioned they are evaluating a renewal and an upgrade next quarter. They asked us to schedule a follow-up call."
+        crm_schema: { account_status: "enum(active|lagging|at_risk|churned)", next_action: "string", owner: "string", health_score: "number(0-100)", last_contact: "date", renewal_date: "date", arr: "number(usd)", tags: "array(string)" }
+        health_baseline: { threshold_days_stuck: 5, cap_pressure_pct: 90, refusal_spike_rate: 0.2 }
+      expect:
+        status: sealed
+    - name: crm-cleanup-noop-sealed
+      runner: cleanup
+      inputs:
+        data_source_ref: local://runx-crm/cleanup-dev
+        crm_export_ref: https://raw.githubusercontent.com/mamonisme/frantic-artifacts/fix79-real-source/b79/fixtures/crm-records.json
+        case_id: initech-003
+        transcript: "Account is fine, no changes needed, status stays active."
+        crm_schema: { account_status: "enum(active|lagging|at_risk|churned)", next_action: "string", owner: "string", health_score: "number(0-100)", last_contact: "date", renewal_date: "date", arr: "number(usd)", tags: "array(string)" }
+        health_baseline: { threshold_days_stuck: 5, cap_pressure_pct: 90, refusal_spike_rate: 0.2 }
+      expect:
+        status: sealed
+    - name: crm-cleanup-readonly-stop
+      runner: refuse
+      inputs:
+        mutate: true
+      expect:
+        status: needs_agent
